@@ -7,6 +7,7 @@
 #include <map>
 #include <iostream>
 #include <fstream>
+#include <algorithm>
 
 using namespace std;
 
@@ -26,9 +27,22 @@ using namespace std;
 #define REQUEST_PEER_LIST_TAG 6
 #define SIZE_OF_PEER_LIST_TAG 7
 #define SEND_PEER_LIST_TAG 8
+#define REQUEST_FILE_INFO_TAG 9
+#define NUMBER_OF_CHUNKS_TAG 10
+#define ACK_NACK_TAG 11
+#define BUSINESS_REQUEST_TAG 12
 
 // The type of messages between peers and tracker
 #define REQUEST_PEER_LIST 0
+#define DOWNLOAD_REQUEST 1
+// Bussiness represents how many chunks a peer has uploaded
+#define BUSINESS_REQUEST 2
+#define REQUEST_FILE_INFO 3
+#define FINISHED_DOWNLOADING 4
+#define SHUTDOWN 5
+
+#define ACK 0
+#define NACK 1
 
 struct file_struct {
     char file_name[MAX_FILENAME];
@@ -52,6 +66,8 @@ struct tracker_struct {
     map<string, file_struct> filesMap;
 
     map<string, vector<int>> peersMap;
+
+    int no_of_finished_peers;
 };
 
 void receive_from_peers(struct tracker_struct *tracker_args, int numtasks)
@@ -84,7 +100,7 @@ void receive_from_peers(struct tracker_struct *tracker_args, int numtasks)
             // Receive the hashes of each segment
             for (int k = 0; k < no_of_segments; k++) {
                 char hash[HASH_SIZE + 1];
-                MPI_Recv(hash, HASH_SIZE + 1, MPI_CHAR, i, HASH_OF_THE_SEGMENT_TAG + k, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(hash, HASH_SIZE + 1, MPI_CHAR, i, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
                 string hash_str(hash);
                 current_file_struct.hashes.push_back(hash_str);
@@ -101,6 +117,7 @@ void receive_from_peers(struct tracker_struct *tracker_args, int numtasks)
 
 void tracker(int numtasks, int rank) {
     struct tracker_struct tracker_args;
+    tracker_args.no_of_finished_peers = 0;
 
     // Receive the information from all peers (the files in the system,
     // their number of segments, their order and who owns them)
@@ -134,10 +151,121 @@ void tracker(int numtasks, int rank) {
 
             // The peer will receive the list of peers that have the file
             for (long unsigned int i = 0; i < peers.size(); i++) {
-                MPI_Send(&peers[i], 1, MPI_INT, status.MPI_SOURCE, SEND_PEER_LIST_TAG + i, MPI_COMM_WORLD);
+                MPI_Send(&peers[i], 1, MPI_INT, status.MPI_SOURCE, SEND_PEER_LIST_TAG, MPI_COMM_WORLD);
+            }
+        } else if (message == REQUEST_FILE_INFO) {
+            
+            // The peer wants the information about a file
+            char file_name[MAX_FILENAME];
+            MPI_Recv(file_name, MAX_FILENAME, MPI_CHAR, status.MPI_SOURCE, REQUEST_FILE_INFO_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            // Send him back the number of segments of the file
+            file_struct file = tracker_args.filesMap[file_name];
+            int no_of_segments = file.total_no_of_segments;
+            MPI_Send(&no_of_segments, 1, MPI_INT, status.MPI_SOURCE, NUMBER_OF_CHUNKS_TAG, MPI_COMM_WORLD);
+
+            // Then, send him the hashes of the segments
+            for (int i = 0; i < no_of_segments; i++) {
+                const char *hash = {file.hashes[i].c_str()};
+                MPI_Send(hash, HASH_SIZE + 1, MPI_CHAR, status.MPI_SOURCE, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD);
+            }
+
+            // If the peer requests the file information, it means that it will
+            // slowly download the file, so he should be added to the list
+            // of peers that have the file
+            tracker_args.peersMap[file_name].push_back(status.MPI_SOURCE);
+        } else if (message == FINISHED_DOWNLOADING) {
+            tracker_args.no_of_finished_peers++;
+            if (tracker_args.no_of_finished_peers == numtasks - 1) {
+                // If all peers have finished downloading, the tracker will
+                // send a shutdown message to all peers (uploading threads)
+                for (int i = 1; i < numtasks; i++) {
+                    char message = SHUTDOWN;
+                    MPI_Send(&message, 1, MPI_CHAR, i, TRACKER_PEER_TAG, MPI_COMM_WORLD);
+                }
+                break;
             }
         }
     }
+}
+
+void request_file_info(struct peer_struct *peer_args, int i)
+{
+    struct file_struct file;
+    strcpy(file.file_name, peer_args->wanted_files[i].file_name);
+    file.current_no_of_segments = 0;
+
+    // Inform the tracker that the peer wants the information about the file
+    char message = REQUEST_FILE_INFO;
+    MPI_Send(&message, 1, MPI_CHAR, TRACKER_RANK, TRACKER_PEER_TAG, MPI_COMM_WORLD);
+
+    // Send the name of the file to the tracker
+    MPI_Send(peer_args->wanted_files[i].file_name, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, REQUEST_FILE_INFO_TAG, MPI_COMM_WORLD);
+
+    // Receive the number of segments of the file
+    int no_of_segments;
+    MPI_Recv(&no_of_segments, 1, MPI_INT, TRACKER_RANK, NUMBER_OF_CHUNKS_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    file.total_no_of_segments = no_of_segments;
+
+    // Receive the hashes of the segments
+    for (int j = 0; j < no_of_segments; j++) {
+        char hash[HASH_SIZE + 1];
+        MPI_Recv(hash, HASH_SIZE + 1, MPI_CHAR, TRACKER_RANK, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        string hash_str(hash);
+        file.hashes.push_back(hash_str);
+    }
+    peer_args->owned_files.push_back(file);
+}
+
+vector<int> request_peer_list(struct peer_struct *peer_args, int i)
+{
+    // Inform the tracker that the peer wants the list of peers that have the file
+    char message = REQUEST_PEER_LIST;
+    MPI_Send(&message, 1, MPI_CHAR, TRACKER_RANK, TRACKER_PEER_TAG, MPI_COMM_WORLD);
+
+    // Send the name of the file to the tracker
+    MPI_Send(peer_args->wanted_files[i].file_name, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, REQUEST_PEER_LIST_TAG, MPI_COMM_WORLD);
+
+    // Receive the size of the list of peers that have the file we want
+    int size;
+    MPI_Recv(&size, 1, MPI_INT, TRACKER_RANK, SIZE_OF_PEER_LIST_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+    // Receive the list of peers that have the file we want
+    vector<int> peers;
+    for (int j = 0; j < size; j++) {
+        int peer;
+        MPI_Recv(&peer, 1, MPI_INT, TRACKER_RANK, SEND_PEER_LIST_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        peers.push_back(peer);
+    }
+
+    // Remove myself from the list of peers that have the file
+    for (long unsigned int j = 0; j < peers.size(); j++) {
+        if (peers[j] == peer_args->rank) {
+            peers.erase(peers.begin() + j);
+            break;
+        }
+    }
+
+    // Ask each peer about their total uploaded chunks
+    vector<int> uploaded_chunks;
+    for (long unsigned int j = 0; j < peers.size(); j++) {
+        char message = BUSINESS_REQUEST;
+        MPI_Send(&message, 1, MPI_CHAR, peers[j], TRACKER_PEER_TAG, MPI_COMM_WORLD);
+
+        int no_of_uploads;
+        MPI_Recv(&no_of_uploads, 1, MPI_INT, peers[j], BUSINESS_REQUEST_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        uploaded_chunks.push_back(no_of_uploads);
+    }
+
+    // We should order the peers by the number of uploaded chunks
+    // in ascending order, that way we can choose the peer with the
+    // least uploaded chunks and if he doesn't have the file, we can
+    // choose the next peer with the least uploaded chunks
+    vector<int> sorted_peers = peers;
+    sort(sorted_peers.begin(), sorted_peers.end(),
+        [&uploaded_chunks](int a, int b) {return uploaded_chunks[a] < uploaded_chunks[b];});
+
+    return sorted_peers;
 }
 
 void *download_thread_func(void *arg)
@@ -148,40 +276,119 @@ void *download_thread_func(void *arg)
     // from the tracker so it can start downloading the file
     for (int i = 0; i < peer_args->no_of_wanted_files; i++) {
 
-        // Inform the tracker that the peer wants the list of peers that have the file
-        char message = REQUEST_PEER_LIST;
-        MPI_Send(&message, 1, MPI_CHAR, TRACKER_RANK, TRACKER_PEER_TAG, MPI_COMM_WORLD);
+        // Request the information about the file (number of segments and hashes)
+        request_file_info(peer_args, i);
 
-        // Send the name of the file to the tracker
-        MPI_Send(peer_args->wanted_files[i].file_name, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, REQUEST_PEER_LIST_TAG, MPI_COMM_WORLD);
-    
-        // Receive the size of the list of peers that have the file we want
-        int size;
-        MPI_Recv(&size, 1, MPI_INT, TRACKER_RANK, SIZE_OF_PEER_LIST_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        // Get the list of peers that have the file we want
+        vector<int> peers = request_peer_list(peer_args, i);
 
-        // Receive the list of peers that have the file we want
-        vector<int> peers;
-        for (int j = 0; j < size; j++) {
-            int peer;
-            MPI_Recv(&peer, 1, MPI_INT, TRACKER_RANK, SEND_PEER_LIST_TAG + j, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            peers.push_back(peer);
+        // Choosing the peer from which to download the file
+        // We'll choose the peer with the least uploaded chunks
+        int best_peer_index = 0;
+        int chosen_peer = peers[best_peer_index];
+
+        int total_no_of_segments = peer_args->owned_files[i].total_no_of_segments;
+        int count = 0;
+        int current_file = peer_args->owned_files.size() - 1;
+
+        // Download the file from the chosen peer
+        // After 10 iterations, the peer will ask again for the list of peers
+        // in order to find the peer with the least uploaded chunks (chosen)
+        while (peer_args->owned_files[current_file].current_no_of_segments < total_no_of_segments) {
+
+            // Inform the chosen peer that we want to download the file
+            char message = DOWNLOAD_REQUEST;
+            MPI_Send(&message, 1, MPI_CHAR, chosen_peer, TRACKER_PEER_TAG, MPI_COMM_WORLD);
+
+            // Send the name of the file
+            MPI_Send(peer_args->wanted_files[current_file].file_name, MAX_FILENAME, MPI_CHAR, chosen_peer, NAME_OF_THE_FILE_TAG, MPI_COMM_WORLD);
+
+            // Send the number of the segment that we want to download
+            MPI_Send(&peer_args->owned_files[current_file].current_no_of_segments, 1, MPI_INT, chosen_peer, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD);
+
+            // Receive an ACK or NACK from the peer
+            char ack;
+            MPI_Recv(&ack, 1, MPI_CHAR, chosen_peer, ACK_NACK_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            if (ack == ACK) {
+                peer_args->owned_files[current_file].current_no_of_segments++;
+            } else {
+
+                // If the peer doesn't have the segment, we'll choose the next peer
+                chosen_peer = peers[++best_peer_index];
+            }
+
+            if (count == 10) {
+                vector<int> peers = request_peer_list(peer_args, i);
+                int best_peer_index = 0;
+                chosen_peer = peers[best_peer_index];
+
+                count = 0;
+            }
         }
 
-        // cout << "I am peer " << peer_args->rank << " and I want the file " << peer_args->wanted_files[i].file_name << endl;
-        // // Print the list of peers that have the file we want
-        // printf("Peers that have the file %s: ", peer_args->wanted_files[i].file_name);
-        // for (long unsigned int j = 0; j < peers.size(); j++) {
-        //     printf("%d ", peers[j]);
-        // }
-        // printf("\n");
+        // Save the list of hashes in a file
+        string output_file_name = "client" + to_string(peer_args->rank) + "_" + peer_args->wanted_files[i].file_name;
+        ofstream output_file(output_file_name);
+        for (int j = 0; j < peer_args->owned_files[current_file].total_no_of_segments; j++) {
+            if (j != peer_args->owned_files[current_file].total_no_of_segments - 1) {
+                output_file << peer_args->owned_files[current_file].hashes[j] << endl;
+            } else {
+                output_file << peer_args->owned_files[current_file].hashes[j];
+            }
+        }
+        output_file.close();
+
     }
 
+    // Inform the tracker that the peer has finished downloading
+    char message = FINISHED_DOWNLOADING;
+    MPI_Send(&message, 1, MPI_CHAR, TRACKER_RANK, TRACKER_PEER_TAG, MPI_COMM_WORLD);
+    
     return NULL;
 }
 
 void *upload_thread_func(void *arg)
 {
     struct peer_struct *peer_args = (struct peer_struct *) arg;
+
+    // Begin receiving messages from peers or tracker
+    while (1) {
+        MPI_Status status;
+        char message;
+        MPI_Recv(&message, 1, MPI_CHAR, MPI_ANY_SOURCE, TRACKER_PEER_TAG, MPI_COMM_WORLD, &status);
+
+        if (message == BUSINESS_REQUEST) {
+            int no_of_uploads = peer_args->no_of_uploaded_chunks;
+            MPI_Send(&no_of_uploads, 1, MPI_INT, status.MPI_SOURCE, BUSINESS_REQUEST_TAG, MPI_COMM_WORLD);
+        } else if (message == DOWNLOAD_REQUEST) {
+            char file_name[MAX_FILENAME];
+            MPI_Recv(file_name, MAX_FILENAME, MPI_CHAR, status.MPI_SOURCE, NAME_OF_THE_FILE_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            int segment;
+            MPI_Recv(&segment, 1, MPI_INT, status.MPI_SOURCE, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            // Find the file that the peer has and check if it has the segment
+            int file_index = -1;
+            for (long unsigned int i = 0; i < peer_args->owned_files.size(); i++) {
+                if (strcmp(peer_args->owned_files[i].file_name, file_name) == 0) {
+                    file_index = i;
+                    break;
+                }
+            }
+            // Check if the peer has the segment
+            if (peer_args->owned_files[file_index].current_no_of_segments >= segment) {
+                char ack = ACK;
+                MPI_Send(&ack, 1, MPI_CHAR, status.MPI_SOURCE, ACK_NACK_TAG, MPI_COMM_WORLD);
+                peer_args->no_of_uploaded_chunks++;
+            } else {
+                char ack = NACK;
+                MPI_Send(&ack, 1, MPI_CHAR, status.MPI_SOURCE, ACK_NACK_TAG, MPI_COMM_WORLD);
+            }
+        } else if (message == SHUTDOWN) {
+            break;
+        }
+    }
 
     return NULL;
 }
@@ -249,7 +456,7 @@ void send_to_tracker_initial_information(struct peer_struct *peer_args)
         // Sending to tracker the hashes of the segments
         for (int j = 0; j < peer_args->owned_files[i].total_no_of_segments; j++) {
             const char *hash = {peer_args->owned_files[i].hashes[j].c_str()};
-            MPI_Send(hash, HASH_SIZE + 1, MPI_CHAR, TRACKER_RANK, HASH_OF_THE_SEGMENT_TAG + j, MPI_COMM_WORLD);
+            MPI_Send(hash, HASH_SIZE + 1, MPI_CHAR, TRACKER_RANK, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD);
         }
     }
 }
