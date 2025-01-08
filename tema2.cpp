@@ -151,7 +151,8 @@ void tracker(int numtasks, int rank) {
 
             // The peer will receive the list of peers that have the file
             for (long unsigned int i = 0; i < peers.size(); i++) {
-                MPI_Send(&peers[i], 1, MPI_INT, status.MPI_SOURCE, SEND_PEER_LIST_TAG, MPI_COMM_WORLD);
+                int peer = peers[i];
+                MPI_Send(&peer, 1, MPI_INT, status.MPI_SOURCE, SEND_PEER_LIST_TAG, MPI_COMM_WORLD);
             }
         } else if (message == REQUEST_FILE_INFO) {
             
@@ -173,9 +174,11 @@ void tracker(int numtasks, int rank) {
             // If the peer requests the file information, it means that it will
             // slowly download the file, so he should be added to the list
             // of peers that have the file
-            tracker_args.peersMap[file_name].push_back(status.MPI_SOURCE);
+            int peer = status.MPI_SOURCE;
+            tracker_args.peersMap[file_name].push_back(peer);
         } else if (message == FINISHED_DOWNLOADING) {
             tracker_args.no_of_finished_peers++;
+            //cout << "Peer " << status.MPI_SOURCE << " has finished downloading" << endl;
             if (tracker_args.no_of_finished_peers == numtasks - 1) {
                 // If all peers have finished downloading, the tracker will
                 // send a shutdown message to all peers (uploading threads)
@@ -239,12 +242,14 @@ vector<int> request_peer_list(struct peer_struct *peer_args, int i)
     }
 
     // Remove myself from the list of peers that have the file
-    for (long unsigned int j = 0; j < peers.size(); j++) {
-        if (peers[j] == peer_args->rank) {
-            peers.erase(peers.begin() + j);
-            break;
-        }
-    }
+    peers.erase(remove(peers.begin(), peers.end(), peer_args->rank), peers.end());
+
+    //Print all the ranks
+    // printf("My rank: %d\n", peer_args->rank);
+    // for (long unsigned int j = 0; j < peers.size(); j++) {
+    //     printf("Rank: %d\n", peers[j]);
+    // }
+    // cout << endl;
 
     // Ask each peer about their total uploaded chunks
     vector<int> uploaded_chunks;
@@ -287,9 +292,9 @@ void *download_thread_func(void *arg)
         int best_peer_index = 0;
         int chosen_peer = peers[best_peer_index];
 
-        int total_no_of_segments = peer_args->owned_files[i].total_no_of_segments;
-        int count = 0;
         int current_file = peer_args->owned_files.size() - 1;
+        int total_no_of_segments = peer_args->owned_files[current_file].total_no_of_segments;
+        int count = 0;
 
         // Download the file from the chosen peer
         // After 10 iterations, the peer will ask again for the list of peers
@@ -297,11 +302,12 @@ void *download_thread_func(void *arg)
         while (peer_args->owned_files[current_file].current_no_of_segments < total_no_of_segments) {
 
             // Inform the chosen peer that we want to download the file
+            // cout << "chosen peer: " << chosen_peer << endl;
             char message = DOWNLOAD_REQUEST;
             MPI_Send(&message, 1, MPI_CHAR, chosen_peer, TRACKER_PEER_TAG, MPI_COMM_WORLD);
 
             // Send the name of the file
-            MPI_Send(peer_args->wanted_files[current_file].file_name, MAX_FILENAME, MPI_CHAR, chosen_peer, NAME_OF_THE_FILE_TAG, MPI_COMM_WORLD);
+            MPI_Send(peer_args->owned_files[current_file].file_name, MAX_FILENAME, MPI_CHAR, chosen_peer, NAME_OF_THE_FILE_TAG, MPI_COMM_WORLD);
 
             // Send the number of the segment that we want to download
             MPI_Send(&peer_args->owned_files[current_file].current_no_of_segments, 1, MPI_INT, chosen_peer, HASH_OF_THE_SEGMENT_TAG, MPI_COMM_WORLD);
@@ -312,15 +318,16 @@ void *download_thread_func(void *arg)
 
             if (ack == ACK) {
                 peer_args->owned_files[current_file].current_no_of_segments++;
+                count++;
             } else {
-
+                
                 // If the peer doesn't have the segment, we'll choose the next peer
                 chosen_peer = peers[++best_peer_index];
             }
 
             if (count == 10) {
-                vector<int> peers = request_peer_list(peer_args, i);
-                int best_peer_index = 0;
+                peers = request_peer_list(peer_args, i);
+                best_peer_index = 0;
                 chosen_peer = peers[best_peer_index];
 
                 count = 0;
@@ -344,7 +351,7 @@ void *download_thread_func(void *arg)
     // Inform the tracker that the peer has finished downloading
     char message = FINISHED_DOWNLOADING;
     MPI_Send(&message, 1, MPI_CHAR, TRACKER_RANK, TRACKER_PEER_TAG, MPI_COMM_WORLD);
-    
+
     return NULL;
 }
 
