@@ -30,13 +30,13 @@ using namespace std;
 #define REQUEST_FILE_INFO_TAG 9
 #define NUMBER_OF_CHUNKS_TAG 10
 #define ACK_NACK_TAG 11
-#define BUSINESS_REQUEST_TAG 12
+#define BUSYNESS_REQUEST_TAG 12
 
 // The type of messages between peers and tracker
 #define REQUEST_PEER_LIST 0
 #define DOWNLOAD_REQUEST 1
 // Bussiness represents how many chunks a peer has uploaded
-#define BUSINESS_REQUEST 2
+#define BUSYNESS_REQUEST 2
 #define REQUEST_FILE_INFO 3
 #define FINISHED_DOWNLOADING 4
 #define SHUTDOWN 5
@@ -178,7 +178,7 @@ void tracker(int numtasks, int rank) {
             tracker_args.peersMap[file_name].push_back(peer);
         } else if (message == FINISHED_DOWNLOADING) {
             tracker_args.no_of_finished_peers++;
-            //cout << "Peer " << status.MPI_SOURCE << " has finished downloading" << endl;
+
             if (tracker_args.no_of_finished_peers == numtasks - 1) {
                 // If all peers have finished downloading, the tracker will
                 // send a shutdown message to all peers (uploading threads)
@@ -244,21 +244,14 @@ vector<int> request_peer_list(struct peer_struct *peer_args, int i)
     // Remove myself from the list of peers that have the file
     peers.erase(remove(peers.begin(), peers.end(), peer_args->rank), peers.end());
 
-    //Print all the ranks
-    // printf("My rank: %d\n", peer_args->rank);
-    // for (long unsigned int j = 0; j < peers.size(); j++) {
-    //     printf("Rank: %d\n", peers[j]);
-    // }
-    // cout << endl;
-
     // Ask each peer about their total uploaded chunks
     vector<int> uploaded_chunks;
     for (long unsigned int j = 0; j < peers.size(); j++) {
-        char message = BUSINESS_REQUEST;
+        char message = BUSYNESS_REQUEST;
         MPI_Send(&message, 1, MPI_CHAR, peers[j], TRACKER_PEER_TAG, MPI_COMM_WORLD);
 
         int no_of_uploads;
-        MPI_Recv(&no_of_uploads, 1, MPI_INT, peers[j], BUSINESS_REQUEST_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Recv(&no_of_uploads, 1, MPI_INT, peers[j], BUSYNESS_REQUEST_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         uploaded_chunks.push_back(no_of_uploads);
     }
 
@@ -266,11 +259,23 @@ vector<int> request_peer_list(struct peer_struct *peer_args, int i)
     // in ascending order, that way we can choose the peer with the
     // least uploaded chunks and if he doesn't have the file, we can
     // choose the next peer with the least uploaded chunks
-    vector<int> sorted_peers = peers;
-    sort(sorted_peers.begin(), sorted_peers.end(),
-        [&uploaded_chunks](int a, int b) {return uploaded_chunks[a] < uploaded_chunks[b];});
+    if (peers.size() >= 2) {
+        for (long unsigned int j = 0; j < peers.size() - 1; j++) {
+            for (long unsigned int k = j + 1; k < peers.size(); k++) {
+                if (uploaded_chunks[j] > uploaded_chunks[k]) {
+                    long aux = peers[j];
+                    peers[j] = peers[k];
+                    peers[k] = aux;
 
-    return sorted_peers;
+                    aux = uploaded_chunks[j];
+                    uploaded_chunks[j] = uploaded_chunks[k];
+                    uploaded_chunks[k] = aux;
+                }
+            }
+        }
+    }
+
+    return peers;
 }
 
 void *download_thread_func(void *arg)
@@ -302,7 +307,6 @@ void *download_thread_func(void *arg)
         while (peer_args->owned_files[current_file].current_no_of_segments < total_no_of_segments) {
 
             // Inform the chosen peer that we want to download the file
-            // cout << "chosen peer: " << chosen_peer << endl;
             char message = DOWNLOAD_REQUEST;
             MPI_Send(&message, 1, MPI_CHAR, chosen_peer, TRACKER_PEER_TAG, MPI_COMM_WORLD);
 
@@ -322,7 +326,12 @@ void *download_thread_func(void *arg)
             } else {
                 
                 // If the peer doesn't have the segment, we'll choose the next peer
-                chosen_peer = peers[++best_peer_index];
+                best_peer_index++;
+                if (best_peer_index == (int) peers.size()) {
+                    chosen_peer = peers[peers.size() - 1];
+                } else {
+                    chosen_peer = peers[best_peer_index];
+                }
             }
 
             if (count == 10) {
@@ -365,9 +374,9 @@ void *upload_thread_func(void *arg)
         char message;
         MPI_Recv(&message, 1, MPI_CHAR, MPI_ANY_SOURCE, TRACKER_PEER_TAG, MPI_COMM_WORLD, &status);
 
-        if (message == BUSINESS_REQUEST) {
+        if (message == BUSYNESS_REQUEST) {
             int no_of_uploads = peer_args->no_of_uploaded_chunks;
-            MPI_Send(&no_of_uploads, 1, MPI_INT, status.MPI_SOURCE, BUSINESS_REQUEST_TAG, MPI_COMM_WORLD);
+            MPI_Send(&no_of_uploads, 1, MPI_INT, status.MPI_SOURCE, BUSYNESS_REQUEST_TAG, MPI_COMM_WORLD);
         } else if (message == DOWNLOAD_REQUEST) {
             char file_name[MAX_FILENAME];
             MPI_Recv(file_name, MAX_FILENAME, MPI_CHAR, status.MPI_SOURCE, NAME_OF_THE_FILE_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -383,6 +392,7 @@ void *upload_thread_func(void *arg)
                     break;
                 }
             }
+
             // Check if the peer has the segment
             if (peer_args->owned_files[file_index].current_no_of_segments >= segment) {
                 char ack = ACK;
