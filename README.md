@@ -14,7 +14,7 @@ When all clients have the files they want, the program ends.
 
 ### Workflow
 
-#### Initialization
+#### `Initialization`
 
 There is a tracker that simply gives clients information about files that they
 want to download.
@@ -35,7 +35,7 @@ After reading the data, each client sends the tracker the information they own.
 When each client finished sending data, the downloading and uploading process
 starts (moment when the tracker adds the client as a peer for the file).
 
-#### Downloading and Uploading
+#### `Downloading and Uploading`
 
 After sending the information mentioned above to the tracker, the clients start
 two threads (one for `downloading` and one for `uploading`).
