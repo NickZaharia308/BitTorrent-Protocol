@@ -1,6 +1,6 @@
 # BitTorrent Protocol
 
-## Copyright 2025 Zaharia Nicusor-Alexandru 335CA
+## Copyright 2025 Zaharia Nicusor-Alexandru
 
 ### Project Idea
 
@@ -84,19 +84,3 @@ wanted files have been downloaded.
 When all clients finish downloading their files, the Tracker sends a message to
 each client (upload thread) to shutdown, then the tracker itself closes.
 
-### Feedback
-
-- It was interesting to write code that runs on three big entities (upload and
-download threads + tracker) and make them communicate in real time with each
-other.
-
-- Homework description and forum answers were very helpful for understading
-the task.
-
-- It was easier and faster to check this homework (locally and with docker)
-which really helped for debugging.
-
-- A lot of small and hard to detect errors because of how MPI works (its own
-data types for sending/receiving, tags etc).
-It would be useful to have a small guide (maybe in the laboratory material)
-about user defined MPI data structures, how to create and how to use them.
